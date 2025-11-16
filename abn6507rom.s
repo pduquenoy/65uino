@@ -88,132 +88,10 @@ RES3          = 32
 RES4          = 64 ; 
 RES5          = 128
 
-.SEGMENT "USERLAND"
-.org $0e ; Just to make listing.txt match
-userland:
+.include "userland.s" ; Userland code - loaded via serial to $000e-$007f
 
-;  validate_si5351_init:
-;     lda #<si5351_init_data
-;     sta ptr
-;     lda #>si5351_init_data
-;     sta ptr+1
-
-;     validate_next:
-;     ldy #0
-;     lda (ptr),y
-;     cmp #$FF
-;     beq done
-;     sta reg
-;     jsr serialbyte        ; Print register address
-
-;     iny
-;     lda (ptr),y
-;     sta val
-
-;     lda reg
-;     jsr read_i2c_reg      ; read register value into inb
-
-;     lda inb
-;     cmp val
-;     beq ok                ; Skip print if matched
-
-;    ; lda #' '
-;     jsr serial_tx
-
-;     lda val
-;     jsr serialbyte
-
-;     ;lda #' '
-;     jsr serial_tx
-
-;     lda inb
-;     jsr serialbyte
-
-; ok:
-;     lda #$0A
-;     jsr serial_tx
-
-;     clc
-;     lda ptr
-;     adc #2
-;     sta ptr
-;     lda ptr+1
-;     adc #0
-;     sta ptr+1
-
-;     jmp validate_next
-
-; done:
-;     rts
-
-; ;Read i2c ROM at address 0x50 and dump it as ascii via serial
-; lda #$50          ; Load the I2C address of the ROM (0x50)
-; sta I2CADDR       ; Store it in the I2CADDR variable
-; jsr i2c_start     ; Start the I2C communication
-; ;Send address  
-; lda #$00          ; Load the address to read from (0x00)
-; jsr i2cbyteout   ; Send the address to the ROM
-
-; receiveloop:
-; ;Read data
-; jsr i2cbytein    ; Read the data from the ROM
-; lda inb          ; Load the received data into the accumulator
-; ;Convert to ASCII
-; jsr hextoa        ; Convert the data to ASCII
-; ;Send data via serial
-; jsr serial_tx     ; Send the data via serial
-; jmp receiveloop ; Loop back to receive the next byte
-
-;print notinromstr
-;print modeenabled
-
-;lda #0
-;sta xtmp
-;jmp stepperdriver
-
-;Jump to selection
-;jsr identifyrom
-;jsr checkblank
-
-; Below should be placed in the zero page
-; Inputs
-; freq0:        .res 1   ; Frequency LSB
-; freq1:        .res 1
-; freq2:        .res 1
-; freq3:        .res 1   ; Frequency MSB
-
-; ; Internal
-; dividend0:    .res 1   ; 750_750_751 (LSB first)
-; dividend1:    .res 1
-; dividend2:    .res 1
-; dividend3:    .res 1
-
-; quotient0:    .res 1   ; Output: quotient (LSB first)
-; quotient1:    .res 1
-; quotient2:    .res 1
-; quotient3:    .res 1
-
-; remainder0:   .res 1
-; remainder1:   .res 1
-; remainder2:   .res 1
-; remainder3:   .res 1
-
-; temp0:        .res 1
-; temp1:        .res 1
-; temp2:        .res 1
-; temp3:        .res 1
-
-; phase_lo:     .res 1
-; phase_hi:     .res 1
-
-halt:
-lda #$02 ; Bit 1 is serial TX (Output)
-sta DDRA
-sty mode
-jmp main ; Get ready for new code
-
-fifobuffer:
-;.res 4
+halt: ; After userland jump back to main without clearing display or reinitializing
+jmp noclear ; Get ready for new code
 
 .segment "RODATA"
 .org $1000  ; Start address for code (for clarity, not strictly needed)
@@ -255,6 +133,9 @@ clearzp:
     lda #244
     jsr delay_long   ; Delay for a short time
 
+    lda DRB
+    and #BTN_DRB3
+    beq wait ; If BTN pressed, continue to check serial
     lda #$60      ; Check for PhaseLoom (Si5351) - 0x60 is the default address
     sta I2CADDR
     jsr i2c_start
@@ -279,6 +160,12 @@ jmp selectormove
 waithere:
 bit DRB
 bvc waithere ; Stay here until USR released
+
+noclear:
+lda #$02 ; Bit 1 is serial TX (Output)
+sta DDRA
+lda #0
+sta mode
 
 main:
     bit DRB               ; Check the status of DRB (Data Register B)
@@ -1026,6 +913,62 @@ bvc l877
 gnewscreen:
 lda lastnewpage
 jmp newscreen ; BRA
+
+; --- Simple RAM test $0800-$0FFF (stop before ROM at $1000) ---
+; Uses ptr (16-bit ZP pointer), xtmp temp nibble from bytetoa, bytetoa & serial_tx.
+; Writes pattern (lowaddr ^ $AA), reads back, compares low address.
+; On first failure prints 16-bit address (high then low) as 4 hex chars, then halts.
+; On success (all passed) halts.
+
+ramtest_init: ; jsr ramtest_init to run or ramtest_loop if you want to set ptr manually
+    lda #<$0800
+    sta ptr
+    lda #>$0800
+    sta ptr+1
+    ldy #0
+
+ramtest_loop:
+    lda ptr          ; low address byte
+    eor #$AA         ; derive pattern
+    sta (ptr),y      ; write
+    lda (ptr),y      ; read
+    eor #$AA         ; undo pattern => should be low addr
+    cmp ptr
+    bne ramtest_fail
+
+    inc ptr          ; advance pointer
+    bne ramtest_advance
+    inc ptr+1
+ramtest_advance:
+    lda ptr+1
+    cmp #$10         ; reached $1000?
+    bne ramtest_loop
+
+; Success: 
+ramtest_success_halt:
+    rts 
+
+ramtest_fail:
+    ; Print high byte of failing address
+    lda ptr+1
+    jsr bytetoa      ; returns two ASCII hex chars: xtmp then A
+    pha
+    lda xtmp
+    jsr serial_tx
+    pla
+    jsr serial_tx
+    ; Print low byte
+    lda ptr
+    jsr bytetoa
+    pha
+    lda xtmp
+    jsr serial_tx
+    pla
+    jsr serial_tx
+ramtest_fail_halt:
+    rts 
+
+; --- End RAM test ---
 
 .segment "VECTORS6502"
 .ORG $1ffa

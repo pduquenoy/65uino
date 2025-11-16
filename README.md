@@ -31,7 +31,6 @@ Be sure to check the complete getting started guide in the [docs folder](docs/ge
 This project is kindly sponsored by JLCPCB. They offer cheap, professional looking PCBs and super fast delivery.
 
 Step 1: Get the gerber file zip package from the /hardware folder
-[hardware/Rev1/65uino-Rev1-gerbers.zip](hardware/Rev1/65uino-Rev1-gerbers.zip) for instance.
 
 Step 2: Upload to JLCPCB [https://jlcpcb.com/?from=Anders_N](https://jlcpcb.com/?from=Anders_N)
 
