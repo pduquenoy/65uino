@@ -46,7 +46,6 @@ jsr setup_si5351
 
   lda #%11110010   ; DRA4–DRA7 + TX as outputs
   sta DDRA
-  lda #%10000000  ; DDRB: SCL, SDA as inputs, DRB6 as input
 
   ldy #1               ; Example index: 1 = 7.030 MHz or any valid one
   sty freq_index  ; Initialize frequency index
@@ -57,7 +56,7 @@ jsr setup_si5351
   beq skip_setup       ; If ptr == 0, skip config
 
   jsr update_leds
-  jsr setup_frequency
+  jsr setup_frequency_from_lut
 
 skip_setup:
 
@@ -105,7 +104,7 @@ check_drb6:
 
   ldy freq_index
   jsr get_freq_ptr     ; returns ptr to freq table (or $0000 for off)
-  jsr setup_frequency    ; Set frequency from freq_index
+  jsr setup_frequency_from_lut    ; Set frequency from freq_index
   lda freq_index ; Save current index for LED update
   pha 
   ldy #0
@@ -305,56 +304,55 @@ done_init:
 ;     bne div_loop
 ;     rts
 
-; --------------------------------------
-; setup_frequency
-; --------------------------------------
-; Sets the Si5351 to a new frequency.
-; Assumes `ptr` points to a frequency data table:
-;   - 8 register values (P3, P1, P2)
-;   - 1 byte: integer PLL divider (used for CLK0 offset)
-;
-; Uses:
-;   - write_ms0_ms1: writes MS0/MS1 config (42–57) from `ptr`
-;
-; Clobbers: A, X, Y
-; --------------------------------------
-
-setup_frequency:
-
+setup_frequency_from_lut:
   ; Disable all CLK outputs (register 3)
   lda #3
   ldy #$ff
   jsr i2c_write_register
+    ; ptr -> combined record: 8 bytes PLL, then 9 bytes MS table
+    ldy #0
+    ; write registers 26..33 (PLL)
+pll_write_loop: ; We can't use y or x so this looks a bit messy
+    tya 
+    pha ; Save loop index
+    lda (ptr),y
+    ; Set target register = 26 + index (we'll put it in A then Y will contain value)
+    tay              ; Save data in Y
+    pla              ; A = register index
+    pha              ; Save loop index
+    clc
+    adc #26
+    jsr i2c_write_register
+    pla ; restore Y loop index
+    tay
+    iny
+    cpy #8
+    bne pll_write_loop
 
-  lda freq_index ; If channel 0 we set it to 8Mhz
-  bne pll700
-  lda #29        ; PLLA integer divider MSB register
-  ldy #14        ; Divider = 14 → 800 MHz
-  bne writepll
+    ; Now write MS table inline at ptr+8
+    ; Set ptr to point to ms table (ptr+8)
+    clc
+    lda ptr
+    adc #8
+    sta ptr
+    lda ptr+1
+    adc #0
+    sta ptr+1
 
-  ; Set PLLA (register 26–28), we only write MSB (register 26)
-  ; 700 MHz → divider = 12
-  pll700:
-  lda #29        ; PLLA integer divider MSB register
-  ldy #12        ; Divider = 12 → 700 MHz
-  writepll:
-  jsr i2c_write_register
+    ; write MS registers (42..49 and 50..57) from the inline table
+    jsr write_ms0_ms1
 
-  ; Write MS0 & MS1 register config using shared data
-  jsr write_ms0_ms1
+    ; Reset PLLs (reg 177)
+    lda #177
+    ldy #$AC
+    jsr i2c_write_register
 
-  ; Reset PLLs (register 177)
-  lda #177
-  ldy #$AC
-  jsr i2c_write_register
+    ; Enable CLK0 & CLK1 outputs (reg 3)
+    lda #3
+    ldy #$FC
+    jsr i2c_write_register
 
-  ; Enable CLK0 & CLK1 outputs (register 3 → clear disable bits)
-  lda #3
-  ldy #$fc       ; 0b11111100 → enable CLK0 & CLK1, disable CLK2
-  jsr i2c_write_register
-
-  rts
-
+    rts
 
 ; Write MS0 and MS1 registers 42–57 using shared 8-byte data table
 ; IN: ptr = pointer to 8-byte data table
@@ -408,121 +406,77 @@ get_freq_ptr:
   sta ptr+1
   rts
 
+; freq=7025000Hz MS=86 VCO=604150000Hz PLL=24,83,500 P=2581,124,500
+; PLL regs 26..33: MSNA P3[15:8], P3[7:0], P1[17:16]+..., P1[15:8], P1[7:0], P2[19:16], P2[15:8], P2[7:0]
+; MS0 regs 42..49: P3,P3,P1[..],P1[15:8],P1[7:0],P2[..],P2[15:8],P2[7:0]
+; MS1 regs 50..57: P3,P3,P1[..],P1[15:8],P1[7:0],P2[..],P2[15:8],P2[7:0]
+; Phase/Integer divider: reg 165 (phase offset for CLK0) - last byte
+frq_7025000_data: .byte 1, 244, 0, 10, 21, 0, 0, 124, 0, 1, 0, 41, 0, 0, 0, 0, 86
 
+; freq=7075000Hz MS=85 VCO=601375000Hz PLL=24,11,200 P=2567,8,200
+frq_7075000_data: .byte 0, 200, 0, 10, 7, 0, 0, 8, 0, 1, 0, 40, 128, 0, 0, 0, 85
+
+; freq=7125000Hz MS=85 VCO=605625000Hz PLL=24,9,40 P=2588,32,40
+frq_7125000_data: .byte 0, 40, 0, 10, 28, 0, 0, 32, 0, 1, 0, 40, 128, 0, 0, 0, 85
+
+; freq=7175000Hz MS=84 VCO=602700000Hz PLL=24,27,250 P=2573,206,250
+frq_7175000_data: .byte 0, 250, 0, 10, 13, 0, 0, 206, 0, 1, 0, 40, 0, 0, 0, 0, 84
+
+; freq=7225000Hz MS=84 VCO=606900000Hz PLL=24,69,250 P=2595,82,250
+frq_7225000_data: .byte 0, 250, 0, 10, 35, 0, 0, 82, 0, 1, 0, 40, 0, 0, 0, 0, 84
+
+; freq=7275000Hz MS=83 VCO=603825000Hz PLL=24,153,1000 P=2579,584,1000
+frq_7275000_data: .byte 3, 232, 0, 10, 19, 0, 2, 72, 0, 1, 0, 39, 128, 0, 0, 0, 83
+
+; freq=89650000Hz MS=7 VCO=627550000Hz PLL=25,51,500 P=2701,28,500
+; PLL regs 26..33: MSNA P3[15:8], P3[7:0], P1[17:16]+..., P1[15:8], P1[7:0], P2[19:16], P2[15:8], P2[7:0]
+; MS0 regs 42..49: P3,P3,P1[..],P1[15:8],P1[7:0],P2[..],P2[15:8],P2[7:0]
+; MS1 regs 50..57: P3,P3,P1[..],P1[15:8],P1[7:0],P2[..],P2[15:8],P2[7:0]
+; Phase/Integer divider: reg 165 (phase offset for CLK0) - last byte
+; freq=89750000Hz MS=7 VCO=628250000Hz PLL=25,13,100 P=2704,64,100
+frq_89750000_data: .byte 0, 100, 0, 10, 144, 0, 0, 64, 0, 1, 0, 1, 128, 0, 0, 0, 7
+
+frq_93350000_data: .byte 1, 244, 0, 11, 17, 0, 1, 76, 0, 1, 0, 1, 128, 0, 0, 0, 7
+
+; freq=97850000Hz MS=7 VCO=684950000Hz PLL=27,199,500 P=2994,472,500
+frq_97850000_data: .byte 1, 244, 0, 11, 178, 0, 1, 216, 0, 1, 0, 1, 128, 0, 0, 0, 7
+
+; freq=98150000Hz MS=7 VCO=687050000Hz PLL=27,241,500 P=3005,348,500
+frq_98150000_data: .byte 1, 244, 0, 11, 189, 0, 1, 92, 0, 1, 0, 1, 128, 0, 0, 0, 7
+
+; freq=100250000Hz MS=6 VCO=601500000Hz PLL=24,3,50 P=2567,34,50
+frq_100250000_data: .byte 0, 50, 0, 10, 7, 0, 0, 34, 0, 1, 0, 1, 0, 0, 0, 0, 6
+
+; freq=102750000Hz MS=6 VCO=616500000Hz PLL=24,33,50 P=2644,24,50
+frq_102750000_data: .byte 0, 50, 0, 10, 84, 0, 0, 24, 0, 1, 0, 1, 0, 0, 0, 0, 6
+
+; freq=104550000Hz MS=6 VCO=627300000Hz PLL=25,23,250 P=2699,194,250
+frq_104550000_data: .byte 0, 250, 0, 10, 139, 0, 0, 194, 0, 1, 0, 1, 0, 0, 0, 0, 6
+
+; freq=106050000Hz MS=6 VCO=636300000Hz PLL=25,113,250 P=2745,214,250
+frq_106050000_data: .byte 0, 250, 0, 10, 185, 0, 0, 214, 0, 1, 0, 1, 0, 0, 0, 0, 6
+
+; freq=144850000Hz MS=5 VCO=724250000Hz PLL=28,97,100 P=3196,16,100
+frq_144850000_data: .byte 0, 100, 0, 12, 124, 0, 0, 16, 0, 1, 0, 0, 128, 0, 0, 0, 5
+
+; Pointer table for generated frequencies
 freq_table:
-  .word frq_7000000_data      ;  0: 7.000 MHz ; Acutally used for 8.000Mhz
-  .word frq_7005000_data      ;  1: 7.005 MHz
-  .word frq_7010000_data      ;  2: 7.010 MHz
-  .word frq_7015000_data      ;  3: 7.015 MHz
-  .word frq_7020000_data      ;  4: 7.020 MHz
-  .word frq_7025000_data      ;  5: 7.025 MHz
-  .word frq_7030000_data      ;  6: 7.030 MHz
-  .word frq_7035000_data      ;  7: 7.035 MHz
-  .word frq_7040000_data      ;  8: 7.040 MHz
-  .word frq_7045000_data      ;  9: 7.045 MHz
-  .word frq_7050000_data      ; 10: 7.050 MHz
-  .word frq_7055000_data      ; 11: 7.055 MHz
-  .word frq_7060000_data      ; 12: 7.060 MHz
-  .word frq_7065000_data      ; 13: 7.065 MHz
-  .word frq_7070000_data      ; 14: 7.070 MHz
-  .word frq_7075000_data      ; 15: 7.075 MHz
-
-; ====== MS0 & MS1 Register Configuration Tables ======
-; Format:
-;   .byte P3[15:8], P3[7:0], R_DIV+DIVBY4+P1[17:16], P1[15:8], P1[7:0],
-;         P2[19:16]+P3[19:16], P2[15:8], P2[7:0], Integer Divider
-/*
-; === 1. 7.000 MHz (Integer mode, Divider = 100)
-frq_7000000_data:
-  .byte $00    ; P3[15:8]
-  .byte $01    ; P3[7:0]         → P3 = 1
-  .byte $00    ; R_DIV + DIVBY4 + P1[17:16] = 0
-  .byte $30    ; P1[15:8]        = 12288 >> 8
-  .byte $00    ; P1[7:0]         = 12288 & $FF
-  .byte $00    ; P2[19:16] + P3[19:16] = 0
-  .byte $00    ; P2[15:8]
-  .byte $00    ; P2[7:0]
-  .byte 100    ; Integer divider (rounded)
-*/
-
-; === 0: 7.000 MHz (INT = 100).byte 004, 000, 0, 048, 000, 000, 000, 000, 100
-frq_7000000_data:
-  .byte 004, 000, 0, 048, 000, 000, 000, 000, 100
-; === 1: 7.005 MHz (INT = 100)
-frq_7005000_data:
-  .byte 004, 000, 0, 047, 246, 000, 003, 001, 100
-; === 2: 7.010 MHz (INT = 100)
-frq_7010000_data:
-  .byte 004, 000, 0, 047, 237, 000, 003, 001, 100
-; === 3: 7.015 MHz (INT = 100)
-frq_7015000_data:
-  .byte 004, 000, 0, 047, 228, 000, 003, 001, 100
-; === 4: 7.020 MHz (INT = 100)
-frq_7020000_data:
-  .byte 004, 000, 0, 047, 219, 000, 002, 001, 100
-; === 5: 7.025 MHz (INT = 100)
-frq_7025000_data:
-  .byte 004, 000, 0, 047, 210, 000, 002, 001, 100
-; === 6: 7.030 MHz (INT = 100)
-frq_7030000_data:
-  .byte 004, 000, 0, 047, 201, 000, 002, 001, 100
-; === 7: 7.035 MHz (INT = 100)
-frq_7035000_data:
-  .byte 004, 000, 0, 047, 192, 000, 002, 001, 100
-; === 8: 7.040 MHz (INT = 99)
-frq_7040000_data:
-  .byte 004, 000, 0, 047, 183, 000, 001, 000, 099
-; === 9: 7.045 MHz (INT = 99)
-frq_7045000_data:
-  .byte 004, 000, 0, 047, 174, 000, 001, 000, 099
-; === 10: 7.050 MHz (INT = 99)
-frq_7050000_data:
-  .byte 004, 000, 0, 047, 165, 000, 001, 000, 099
-; === 11: 7.055 MHz (INT = 99)
-frq_7055000_data:
-  .byte 004, 000, 0, 047, 156, 000, 000, 000, 099
-; === 12: 7.060 MHz (INT = 99)
-frq_7060000_data:
-  .byte 004, 000, 0, 047, 147, 000, 000, 000, 099
-; === 13: 7.065 MHz (INT = 99)
-frq_7065000_data:
-  .byte 004, 000, 0, 047, 138, 000, 000, 000, 099
-; === 14: 7.070 MHz (INT = 99)
-frq_7070000_data:
-  .byte 004, 000, 0, 047, 129, 000, 000, 000, 099
-; === 15: 7.075 MHz (INT = 99)
-frq_7075000_data:
-  .byte 004, 000, 0, 047, 120, 000, 003, 001, 099
-; === 16: 7.080 MHz (INT = 99)
-frq_7080000_data:
-  .byte 004, 000, 0, 047, 111, 000, 003, 001, 099
-; === 17: 7.085 MHz (INT = 99)
-frq_7085000_data:
-  .byte 004, 000, 0, 047, 102, 000, 003, 001, 099
-; === 18: 7.090 MHz (INT = 99)
-frq_7090000_data:
-  .byte 004, 000, 0, 047, 093, 000, 002, 001, 099
-; === 19: 7.095 MHz (INT = 99)
-frq_7095000_data:
-  .byte 004, 000, 0, 047, 084, 000, 002, 001, 099
-; === 20: 7.100 MHz (INT = 99)
-frq_7100000_data:
-  .byte 004, 000, 0, 047, 075, 000, 002, 001, 099
-; === 11: 28.400 MHz (INT = 25)
-frq_28400000_data:
-  .byte $04, $00, $00, $08, $C0, $30, $01, $00, 25
-
-; === 12: 50.313 MHz (INT = 14)
-frq_50313000_data:
-  .byte $04, $00, $00, $04, $F8, $30, $01, $C0, 14
-
-; === 13: 87.600 MHz (INT = 8)
-frq_87600000_data:
-  .byte $04, $00, $00, $01, $FE, $30, $02, $00, 8
-
-; === 14: 105.400 MHz (INT = 7)
-frq_105400000_data:
-  .byte $04, $00, $00, $01, $51, $30, $01, $40, 7
+  .word frq_7025000_data
+  .word frq_7075000_data
+  .word frq_7125000_data
+  .word frq_7175000_data
+  .word frq_7225000_data
+  .word frq_7275000_data
+  .word frq_89750000_data ; P3
+  .word frq_93350000_data ; P1
+  .word frq_97850000_data ; NORD
+  .word frq_98150000_data ; P4
+  .word frq_100250000_data ; The Voice
+  .word frq_102750000_data ; Radio4
+  .word frq_104550000_data ; ANR
+  .word frq_106050000_data ; NOVA
+  .word frq_144850000_data ; APRS
+  
 
 ; ====== Si5351 Initialization Data ======
 si5351_init_data:
